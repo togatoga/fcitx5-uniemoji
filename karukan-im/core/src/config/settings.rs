@@ -73,6 +73,31 @@ impl SymbolSettings {
     }
 }
 
+/// How the candidate window lays out one page. A tagged value, so each
+/// layout carries exactly its own parameters (like `[date]`'s phrases):
+/// `{ type = "vertical" }` has none, `{ type = "grid", columns = 5,
+/// rows = 5 }` carries its dimensions, defaulting to 5×5 when omitted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CandidateLayout {
+    /// One column of up to 9 numbered candidates (mozc-style).
+    #[default]
+    Vertical,
+    /// A grid of `columns` × `rows` candidates per page, like the expanded
+    /// table view of macOS 日本語入力 / MS-IME. More candidates per page,
+    /// no numbering (Ctrl+digit still selects the first nine).
+    Grid {
+        #[serde(default = "default_grid_dimension")]
+        columns: usize,
+        #[serde(default = "default_grid_dimension")]
+        rows: usize,
+    },
+}
+
+fn default_grid_dimension() -> usize {
+    5
+}
+
 /// Aux-line settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplaySettings {
@@ -80,6 +105,8 @@ pub struct DisplaySettings {
     /// which part the alternatives cover, inference timing, the model that
     /// ran, and the context handed to it.
     pub verbose: bool,
+    /// Candidate window layout: vertical list or grid.
+    pub candidate_layout: CandidateLayout,
 }
 
 /// Conversion strategy mode
@@ -421,6 +448,37 @@ phrases = [
             Some(["{YEAR}年".to_string()].as_slice())
         );
         assert!(!settings.date.formats.is_empty());
+    }
+
+    #[test]
+    fn test_default_candidate_layout() {
+        let settings = Settings::default();
+        assert_eq!(settings.display.candidate_layout, CandidateLayout::Vertical);
+    }
+
+    #[test]
+    fn test_candidate_layout_grid_defaults_to_5x5() {
+        // The layout and its parameters travel together; omitted grid
+        // dimensions fall back to 5.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+[display]
+candidate_layout = {{ type = "grid", rows = 4 }}
+"#
+        )
+        .unwrap();
+
+        let settings = Settings::load_from(file.path()).unwrap();
+        assert_eq!(
+            settings.display.candidate_layout,
+            CandidateLayout::Grid {
+                columns: 5,
+                rows: 4
+            }
+        );
+        assert!(!settings.display.verbose);
     }
 
     #[test]

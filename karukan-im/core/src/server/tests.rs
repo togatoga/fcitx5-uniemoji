@@ -185,6 +185,37 @@ fn test_select_candidate_commits_page_candidate() {
 }
 
 #[test]
+fn test_grid_layout_rides_on_show_candidates() {
+    // With the grid layout configured, every show_candidates carries the
+    // column count for the frontend; the vertical default omits the field.
+    let mut settings = Settings::default();
+    settings.display.candidate_layout = crate::config::settings::CandidateLayout::Grid {
+        columns: 5,
+        rows: 5,
+    };
+    let mut server = ImServer::with_settings(settings);
+    press(&mut server, XKB_KEY_K);
+    press(&mut server, XKB_KEY_A);
+    let resp = press(&mut server, XKB_KEY_SPACE);
+    let shows = actions_of(&resp, "show_candidates");
+    assert_eq!(shows.last().unwrap()["grid_columns"], 5);
+
+    // Grid page size (25) admits page indexes the vertical list rejects.
+    let resp = request(
+        &mut server,
+        json!({"jsonrpc":"2.0","id":30,"method":"select_candidate","params":{"page_index":9}}),
+    );
+    assert!(resp["error"].is_null());
+
+    let mut server = test_server();
+    press(&mut server, XKB_KEY_K);
+    press(&mut server, XKB_KEY_A);
+    let resp = press(&mut server, XKB_KEY_SPACE);
+    let shows = actions_of(&resp, "show_candidates");
+    assert!(shows.last().unwrap().get("grid_columns").is_none());
+}
+
+#[test]
 fn test_select_candidate_out_of_range() {
     let mut server = test_server();
     let resp = request(

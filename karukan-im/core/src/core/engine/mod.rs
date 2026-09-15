@@ -271,6 +271,18 @@ impl InputMethodEngine {
         self.state.candidates()
     }
 
+    /// Candidates per page of the candidate window (layout-dependent).
+    /// Bounds the `select_candidate` page index on the JSON-RPC server.
+    pub fn candidate_page_size(&self) -> usize {
+        self.config.candidate_page_size()
+    }
+
+    /// Columns of the grid candidate layout; `None` for the vertical list.
+    /// Rides on every `ShowCandidates` so the frontend renders to match.
+    pub fn candidate_grid_columns(&self) -> Option<usize> {
+        self.config.candidate_grid_columns()
+    }
+
     /// Reset the engine state
     /// Note: surrounding_context is intentionally NOT cleared here.
     /// It is set once at activate() time and should persist through
@@ -568,7 +580,7 @@ impl InputMethodEngine {
                 seen.insert(candidate.text.clone()).then_some(candidate)
             })
             .collect();
-        CandidateList::new(settled)
+        CandidateList::with_page_size(settled, self.config.candidate_page_size())
     }
 
     /// Process a key event

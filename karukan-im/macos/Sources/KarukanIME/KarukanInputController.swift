@@ -175,7 +175,7 @@ class KarukanInputController: IMKInputController {
                 hasPreedit = !text.isEmpty
                 setMarkedText(text: text, caret: caret, attributes: attributes, client: client)
 
-            case .showCandidates(let candidates, let cursor, let page, let totalPages):
+            case .showCandidates(let candidates, let cursor, let page, let totalPages, let gridColumns):
                 // Query the composition anchor (a synchronous IPC into the
                 // focused app) only when the panel comes on screen; it
                 // doesn't move while the panel stays visible.
@@ -190,6 +190,7 @@ class KarukanInputController: IMKInputController {
                     cursor: cursor,
                     page: page,
                     totalPages: totalPages,
+                    gridColumns: gridColumns,
                     cursorRect: cursorRect
                 )
 

@@ -59,6 +59,17 @@ max_surface_chars = 50
 # 補助テキストに詳細（別候補の範囲・推論時間・モデル名・文脈）を表示する。
 # Ctrl+Shift+V でいつでも切り替えられる。
 verbose = false
+# 候補ウィンドウのレイアウト。type と、そのレイアウトが使うパラメータを
+# ひとつの値として書く（vertical にパラメータはない）:
+#   縦一列（既定・番号つき）: candidate_layout = { type = "vertical" }
+#   グリッド表示:            candidate_layout = { type = "grid", columns = 5, rows = 5 }
+# grid は 1 ページに columns × rows 個の候補を並べる（macOS の日本語入力や
+# MS-IME の「候補の一覧表示」に相当）。columns / rows は省略すると 5。
+# 番号は表示されないが、Ctrl+1〜9 での選択は先頭 9 候補にそのまま使える。
+# grid 中の移動: ←→↑↓ / Ctrl+B・F（左右）/ Ctrl+N・P（上下）/
+# Ctrl+A・E（行頭・行末）。Space・Tab は従来どおり次候補、
+# PageUp/PageDown はページ移動。
+candidate_layout = { type = "vertical" }
 
 # どのキーがどの記号を入力するか。幅（半角・全角）は [width] が決める。
 [symbol]

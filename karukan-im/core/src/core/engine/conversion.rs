@@ -551,8 +551,15 @@ impl InputMethodEngine {
             // X11) prev-candidate for mozc-compatible muscle memory.
             Keysym::ISO_LEFT_TAB => self.prev_candidate(),
             Keysym::TAB if key.modifiers.shift_key => self.prev_candidate(),
-            Keysym::SPACE | Keysym::DOWN | Keysym::TAB => self.next_candidate(),
-            Keysym::UP => self.prev_candidate(),
+            Keysym::SPACE | Keysym::TAB => self.next_candidate(),
+            // In the grid layout ↓/↑ move by a row (the cell below/above);
+            // in the vertical list they stay next/prev candidate.
+            Keysym::DOWN => self.candidate_down(),
+            Keysym::UP => self.candidate_up(),
+            // Grid only: ←/→ walk the row. In the vertical list they keep
+            // dropping back to caret editing (the arm below).
+            Keysym::LEFT if self.grid_columns().is_some() => self.prev_candidate(),
+            Keysym::RIGHT if self.grid_columns().is_some() => self.next_candidate(),
             Keysym::PAGE_DOWN => self.next_candidate_page(),
             Keysym::PAGE_UP => self.prev_candidate_page(),
             // Ctrl+Backspace / Ctrl+Delete: delete the selected learning
@@ -586,8 +593,24 @@ impl InputMethodEngine {
                 // Ctrl+N / Ctrl+P: emacs-style candidate navigation
                 if key.modifiers.control_key {
                     match key.keysym {
-                        Keysym::KEY_N | Keysym::KEY_N_UPPER => return self.next_candidate(),
-                        Keysym::KEY_P | Keysym::KEY_P_UPPER => return self.prev_candidate(),
+                        // Emacs-style navigation. In the grid layout the
+                        // whole set maps onto the grid like the arrow keys:
+                        // Ctrl+N/P a row down/up, Ctrl+F/B along the row,
+                        // Ctrl+A/E to the row's first/last cell.
+                        Keysym::KEY_N | Keysym::KEY_N_UPPER => return self.candidate_down(),
+                        Keysym::KEY_P | Keysym::KEY_P_UPPER => return self.candidate_up(),
+                        Keysym::KEY_F | Keysym::KEY_F_UPPER if self.grid_columns().is_some() => {
+                            return self.next_candidate();
+                        }
+                        Keysym::KEY_B | Keysym::KEY_B_UPPER if self.grid_columns().is_some() => {
+                            return self.prev_candidate();
+                        }
+                        Keysym::KEY_A | Keysym::KEY_A_UPPER if self.grid_columns().is_some() => {
+                            return self.candidate_row_start();
+                        }
+                        Keysym::KEY_E | Keysym::KEY_E_UPPER if self.grid_columns().is_some() => {
+                            return self.candidate_row_end();
+                        }
                         // Ctrl+R / Ctrl+T: cycle the source filter. Both
                         // keysym cases — some environments fold Shift into
                         // an uppercase keysym; direction must not change.
@@ -871,6 +894,46 @@ impl InputMethodEngine {
     /// Select previous candidate
     fn prev_candidate(&mut self) -> EngineResult {
         self.navigate_candidate(CandidateList::move_prev)
+    }
+
+    /// Columns of the grid candidate layout; `None` in the vertical list.
+    fn grid_columns(&self) -> Option<usize> {
+        self.config.candidate_grid_columns()
+    }
+
+    /// ↓ / Ctrl+N: a row down in the grid, the next candidate in the
+    /// vertical list.
+    fn candidate_down(&mut self) -> EngineResult {
+        match self.grid_columns() {
+            Some(columns) => self.navigate_candidate(|c| c.move_down(columns)),
+            None => self.next_candidate(),
+        }
+    }
+
+    /// ↑ / Ctrl+P: a row up in the grid, the previous candidate in the
+    /// vertical list.
+    fn candidate_up(&mut self) -> EngineResult {
+        match self.grid_columns() {
+            Some(columns) => self.navigate_candidate(|c| c.move_up(columns)),
+            None => self.prev_candidate(),
+        }
+    }
+
+    /// Ctrl+A in the grid: the row's first cell. Only bound there — the
+    /// vertical list keeps Ctrl+A as the composing caret move.
+    fn candidate_row_start(&mut self) -> EngineResult {
+        match self.grid_columns() {
+            Some(columns) => self.navigate_candidate(|c| c.move_row_start(columns)),
+            None => EngineResult::consumed(),
+        }
+    }
+
+    /// Ctrl+E in the grid: the row's last occupied cell.
+    fn candidate_row_end(&mut self) -> EngineResult {
+        match self.grid_columns() {
+            Some(columns) => self.navigate_candidate(|c| c.move_row_end(columns)),
+            None => EngineResult::consumed(),
+        }
     }
 
     /// Go to next candidate page

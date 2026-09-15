@@ -5,7 +5,7 @@ use karukan_engine::{
     SymbolStyle, WidthRules,
 };
 
-use crate::config::settings::{SpaceStyle, StrategyMode};
+use crate::config::settings::{CandidateLayout, SpaceStyle, StrategyMode};
 
 use super::super::candidate::CandidateList;
 use super::super::preedit::Preedit;
@@ -100,6 +100,9 @@ pub struct EngineConfig {
     pub strategy: StrategyMode,
     /// Show the detailed aux line (Ctrl+Shift+V toggles it).
     pub verbose: bool,
+    /// Candidate window layout: vertical list, or a grid carrying its own
+    /// columns × rows.
+    pub candidate_layout: CandidateLayout,
     /// Whether live conversion is enabled at engine startup
     pub live_conversion: bool,
     /// Which symbol the `,` `.` `/` `[` `]` keys type
@@ -133,11 +136,32 @@ impl EngineConfig {
             max_latency_ms: settings.conversion.max_latency_ms,
             strategy: settings.conversion.strategy,
             verbose: settings.display.verbose,
+            candidate_layout: settings.display.candidate_layout,
             live_conversion: settings.conversion.live_conversion,
             symbol: settings.symbol.style(),
             width: settings.width,
             space: settings.symbol.space,
             date: settings.date.clone(),
+        }
+    }
+
+    /// Candidates per page of the candidate window: the grid's rows ×
+    /// columns, or the classic 9-row column. A zero dimension in the config
+    /// is treated as 1 so the window can never go empty.
+    pub fn candidate_page_size(&self) -> usize {
+        match self.candidate_layout {
+            CandidateLayout::Vertical => CandidateList::DEFAULT_PAGE_SIZE,
+            CandidateLayout::Grid { columns, rows } => columns.max(1) * rows.max(1),
+        }
+    }
+
+    /// Columns of the grid layout; `None` for the vertical list. This is
+    /// what the frontends key their rendering on, and what makes ↑/↓ (and
+    /// Ctrl+N/P) move by a row instead of a candidate.
+    pub fn candidate_grid_columns(&self) -> Option<usize> {
+        match self.candidate_layout {
+            CandidateLayout::Vertical => None,
+            CandidateLayout::Grid { columns, .. } => Some(columns.max(1)),
         }
     }
 }
@@ -157,6 +181,7 @@ impl Default for EngineConfig {
             max_latency_ms: 100,
             strategy: StrategyMode::default(),
             verbose: false,
+            candidate_layout: CandidateLayout::default(),
             live_conversion: false,
             symbol: SymbolStyle::default(),
             width: WidthRules::default(),

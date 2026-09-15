@@ -17,7 +17,7 @@ struct PreeditAttr: Decodable {
     let style: String
 }
 
-struct CandidateItem: Decodable {
+struct CandidateItem: Decodable, Equatable {
     let text: String
     let description: String?
 }
@@ -29,14 +29,18 @@ struct InitResult: Decodable {
 
 enum EngineAction: Decodable {
     case updatePreedit(text: String, caret: Int, attributes: [PreeditAttr])
-    case showCandidates(candidates: [CandidateItem], cursor: Int, page: Int, totalPages: Int)
+    /// `gridColumns` is present when the engine's candidate layout is the
+    /// grid (`[display] candidate_layout`): render the page row-major at
+    /// that many columns. Absent = classic vertical list.
+    case showCandidates(
+        candidates: [CandidateItem], cursor: Int, page: Int, totalPages: Int, gridColumns: Int?)
     case hideCandidates
     case commit(text: String)
     case updateAux(text: String)
     case hideAux
 
     private enum CodingKeys: String, CodingKey {
-        case type, text, caret, attributes, candidates, cursor, page, totalPages
+        case type, text, caret, attributes, candidates, cursor, page, totalPages, gridColumns
     }
 
     init(from decoder: Decoder) throws {
@@ -55,7 +59,8 @@ enum EngineAction: Decodable {
                 candidates: try container.decode([CandidateItem].self, forKey: .candidates),
                 cursor: try container.decode(Int.self, forKey: .cursor),
                 page: try container.decode(Int.self, forKey: .page),
-                totalPages: try container.decode(Int.self, forKey: .totalPages)
+                totalPages: try container.decode(Int.self, forKey: .totalPages),
+                gridColumns: try container.decodeIfPresent(Int.self, forKey: .gridColumns)
             )
         case "hide_candidates":
             self = .hideCandidates

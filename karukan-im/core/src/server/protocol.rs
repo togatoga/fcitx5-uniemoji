@@ -171,6 +171,11 @@ pub enum Action {
         /// Current page (0-based).
         page: usize,
         total_pages: usize,
+        /// Columns of the grid layout (`[display] candidate_layout`): the
+        /// page fills row-major, `candidates.len()` ≤ columns × rows.
+        /// Absent for the classic vertical list.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grid_columns: Option<usize>,
     },
     HideCandidates,
     Commit {

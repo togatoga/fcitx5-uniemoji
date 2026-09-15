@@ -139,6 +139,16 @@ impl CandidateList {
         }
     }
 
+    /// Create a candidate list with an explicit page size (the grid layout
+    /// shows rows × columns per page). Clamped to at least 1 so pagination
+    /// arithmetic never divides by zero.
+    pub fn with_page_size(candidates: Vec<Candidate>, page_size: usize) -> Self {
+        Self {
+            page_size: page_size.max(1),
+            ..Self::new(candidates)
+        }
+    }
+
     /// Create a candidate list from strings (test fixture).
     #[cfg(test)]
     pub fn from_strings(strings: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -237,6 +247,61 @@ impl CandidateList {
         } else {
             false
         }
+    }
+
+    /// Grid layout: move one row down — the candidate `columns` further
+    /// along, which is the cell below in a row-major grid. Crossing the last
+    /// row of a page lands on the next page's first row in the same column
+    /// (`page_size` is a multiple of `columns`, so the visual column is
+    /// `cursor % columns` on every page); past the last candidate it wraps
+    /// to the top of the same column.
+    pub fn move_down(&mut self, columns: usize) -> bool {
+        if self.candidates.is_empty() || columns == 0 {
+            return false;
+        }
+        if self.cursor + columns < self.candidates.len() {
+            self.cursor += columns;
+        } else {
+            self.cursor %= columns;
+        }
+        true
+    }
+
+    /// Grid layout: move one row up, wrapping to the bottom of the same
+    /// column — the mirror of [`Self::move_down`].
+    pub fn move_up(&mut self, columns: usize) -> bool {
+        if self.candidates.is_empty() || columns == 0 {
+            return false;
+        }
+        if self.cursor >= columns {
+            self.cursor -= columns;
+        } else {
+            let column = self.cursor % columns;
+            self.cursor = column + ((self.candidates.len() - 1 - column) / columns) * columns;
+        }
+        true
+    }
+
+    /// Grid layout: jump to the first cell of the cursor's row (Ctrl+A).
+    /// Rows never span pages (`page_size` is a multiple of `columns`).
+    pub fn move_row_start(&mut self, columns: usize) -> bool {
+        if self.candidates.is_empty() || columns == 0 {
+            return false;
+        }
+        self.cursor -= self.cursor % columns;
+        true
+    }
+
+    /// Grid layout: jump to the last occupied cell of the cursor's row
+    /// (Ctrl+E) — the row's final column, or the last candidate when the
+    /// final row is partial.
+    pub fn move_row_end(&mut self, columns: usize) -> bool {
+        if self.candidates.is_empty() || columns == 0 {
+            return false;
+        }
+        let row_start = self.cursor - self.cursor % columns;
+        self.cursor = (row_start + columns - 1).min(self.candidates.len() - 1);
+        true
     }
 
     /// Move to the next page
@@ -352,6 +417,77 @@ mod tests {
         // Wrap to first page
         candidates.next_page();
         assert_eq!(candidates.current_page(), 0);
+    }
+
+    /// 2×3-per-page grid list (page_size 6, columns 2) over `n` items.
+    fn grid_list(n: usize) -> CandidateList {
+        let items = (1..=n)
+            .map(|i| Candidate::new(format!("item{}", i)))
+            .collect();
+        CandidateList::with_page_size(items, 6)
+    }
+
+    #[test]
+    fn test_with_page_size_pagination() {
+        let mut candidates = grid_list(8);
+        assert_eq!(candidates.page_size(), 6);
+        assert_eq!(candidates.total_pages(), 2);
+        assert_eq!(candidates.page_candidates().len(), 6);
+        candidates.next_page();
+        assert_eq!(candidates.page_candidates().len(), 2);
+        // Zero is clamped so pagination arithmetic stays defined.
+        assert_eq!(CandidateList::with_page_size(Vec::new(), 0).page_size(), 1);
+    }
+
+    #[test]
+    fn test_grid_move_down_and_up() {
+        // 2 columns: item1 item2 / item3 item4 / item5 item6 | item7 item8
+        let mut candidates = grid_list(8);
+
+        assert!(candidates.move_down(2));
+        assert_eq!(candidates.selected_text(), Some("item3"));
+
+        // Crossing the page's last row lands on the next page, same column.
+        candidates.set_cursor(4); // item5, bottom row of page 0
+        assert!(candidates.move_down(2));
+        assert_eq!(candidates.selected_text(), Some("item7"));
+        assert_eq!(candidates.current_page(), 1);
+
+        // Past the last candidate: wrap to the top of the same column.
+        assert!(candidates.move_down(2));
+        assert_eq!(candidates.selected_text(), Some("item1"));
+
+        // move_up mirrors it: wrap to the bottom of the same column.
+        assert!(candidates.move_up(2));
+        assert_eq!(candidates.selected_text(), Some("item7"));
+        assert!(candidates.move_up(2));
+        assert_eq!(candidates.selected_text(), Some("item5"));
+
+        // A column whose bottom row is missing wraps to its lowest cell:
+        // column 1's last occupied row holds item8.
+        candidates.set_cursor(1); // item2
+        assert!(candidates.move_up(2));
+        assert_eq!(candidates.selected_text(), Some("item8"));
+    }
+
+    #[test]
+    fn test_grid_move_row_start_and_end() {
+        // 2 columns: item1 item2 / item3 item4 / item5 item6 | item7 item8
+        let mut candidates = grid_list(8);
+
+        candidates.set_cursor(3); // item4
+        assert!(candidates.move_row_start(2));
+        assert_eq!(candidates.selected_text(), Some("item3"));
+        assert!(candidates.move_row_end(2));
+        assert_eq!(candidates.selected_text(), Some("item4"));
+
+        // A partial final row ends at the last candidate.
+        let mut candidates = grid_list(7);
+        candidates.set_cursor(6); // item7, alone on its row
+        assert!(candidates.move_row_end(2));
+        assert_eq!(candidates.selected_text(), Some("item7"));
+        assert!(candidates.move_row_start(2));
+        assert_eq!(candidates.selected_text(), Some("item7"));
     }
 
     #[test]

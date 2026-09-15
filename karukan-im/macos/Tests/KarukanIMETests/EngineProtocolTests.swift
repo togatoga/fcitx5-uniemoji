@@ -28,7 +28,7 @@ final class EngineProtocolTests: XCTestCase {
             """
         let result = try decodeKeyResult(json)
         guard
-            case .showCandidates(let candidates, let cursor, let page, let totalPages) =
+            case .showCandidates(let candidates, let cursor, let page, let totalPages, let gridColumns) =
                 result.actions[0]
         else {
             return XCTFail("expected show_candidates")
@@ -40,7 +40,20 @@ final class EngineProtocolTests: XCTestCase {
         XCTAssertEqual(cursor, 0)
         XCTAssertEqual(page, 0)
         XCTAssertEqual(totalPages, 3)
+        // Absent on the wire = vertical list.
+        XCTAssertNil(gridColumns)
         XCTAssertEqual(result.conversionMs, 11)
+    }
+
+    func testDecodeShowCandidatesGrid() throws {
+        let json = """
+            {"consumed":true,"actions":[{"candidates":[{"text":"カ"},{"text":"か"}],"cursor":1,"page":0,"total_pages":1,"grid_columns":5,"type":"show_candidates"}],"conversion_ms":0,"process_key_ms":0}
+            """
+        let result = try decodeKeyResult(json)
+        guard case .showCandidates(_, _, _, _, let gridColumns) = result.actions[0] else {
+            return XCTFail("expected show_candidates")
+        }
+        XCTAssertEqual(gridColumns, 5)
     }
 
     func testDecodeCommitAndHide() throws {

@@ -9,7 +9,6 @@ pub mod protocol;
 use serde_json::{Value, json};
 
 use crate::config::Settings;
-use crate::core::candidate::CandidateList;
 use crate::core::engine::{EngineAction, EngineConfig, EngineResult, InputMethodEngine};
 use crate::core::keycode::{KeyEvent, Keysym};
 use crate::core::state::InputState;
@@ -94,7 +93,7 @@ impl ImServer {
             }
             "select_candidate" => {
                 let params: SelectCandidateParams = parse_params(params)?;
-                if params.page_index >= CandidateList::DEFAULT_PAGE_SIZE {
+                if params.page_index >= self.engine.candidate_page_size() {
                     return Err(RpcError::new(
                         RpcError::INVALID_PARAMS,
                         format!("page_index out of range: {}", params.page_index),
@@ -162,7 +161,12 @@ impl ImServer {
     }
 
     fn key_result(&self, result: EngineResult) -> Result<Value, RpcError> {
-        let actions = result.actions.into_iter().map(to_action).collect();
+        let grid_columns = self.engine.candidate_grid_columns();
+        let actions = result
+            .actions
+            .into_iter()
+            .map(|a| to_action(a, grid_columns))
+            .collect();
         serde_json::to_value(KeyResult {
             consumed: result.consumed,
             actions,
@@ -182,7 +186,7 @@ fn internal_error(e: serde_json::Error) -> RpcError {
     RpcError::new(RpcError::INTERNAL_ERROR, format!("internal error: {e}"))
 }
 
-fn to_action(action: EngineAction) -> Action {
+fn to_action(action: EngineAction, grid_columns: Option<usize>) -> Action {
     use crate::core::preedit::AttributeType;
 
     match action {
@@ -216,6 +220,7 @@ fn to_action(action: EngineAction) -> Action {
             cursor: list.page_cursor(),
             page: list.current_page(),
             total_pages: list.total_pages(),
+            grid_columns,
         },
         EngineAction::HideCandidates => Action::HideCandidates,
         EngineAction::Commit(text) => Action::Commit { text },
