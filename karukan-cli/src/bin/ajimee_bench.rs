@@ -41,6 +41,13 @@ struct Cli {
     #[arg(long)]
     quiet: bool,
 
+    /// Typing simulation: convert every growing prefix of each reading
+    /// (first 30 items) and report per-keystroke latency. This is the
+    /// live-conversion access pattern, where KV prefix reuse applies;
+    /// the independent-items evaluation cannot show it.
+    #[arg(long)]
+    typing: bool,
+
     /// Context window size
     #[arg(long, default_value_t = 512)]
     n_ctx: u32,
@@ -142,6 +149,51 @@ fn calculate_min_cer(hypothesis: &str, references: &[String]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+/// Convert every growing prefix of each reading, timing each call: the
+/// per-keystroke cost of live conversion.
+fn run_typing_sim(
+    model: &karukan_engine::kanji::LlamaCppModel,
+    items: &[BenchItem],
+    no_context: bool,
+    eos: Option<i32>,
+) -> Result<()> {
+    use std::time::Instant;
+    const ITEMS: usize = 30;
+
+    let mut lat_ms: Vec<f64> = Vec::new();
+    for item in items.iter().filter(|i| !i.input.is_empty()).take(ITEMS) {
+        let context = if no_context {
+            ""
+        } else {
+            item.context_text.as_deref().unwrap_or("")
+        };
+        let chars: Vec<char> = item.input.chars().collect();
+        for i in 1..=chars.len() {
+            let prefix: String = chars[..i].iter().collect();
+            let start = Instant::now();
+            let prompt = build_jinen_prompt(&prefix, context);
+            let tokens = model.tokenize(&prompt)?;
+            model.generate(&tokens, 100, eos)?;
+            lat_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+
+    lat_ms.sort_by(|a, b| a.total_cmp(b));
+    let n = lat_ms.len();
+    let total: f64 = lat_ms.iter().sum();
+    let median = lat_ms[n / 2];
+    let p95 = lat_ms[((n as f64 * 0.95) as usize).min(n - 1)];
+    println!("Typing simulation ({ITEMS} items, {n} keystrokes)");
+    println!(
+        "total {:.2}s  mean {:.1}ms  median {:.1}ms  p95 {:.1}ms per keystroke",
+        total / 1000.0,
+        total / n as f64,
+        median,
+        p95
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -162,6 +214,10 @@ fn main() -> Result<()> {
     let items: Vec<BenchItem> =
         serde_json::from_str(&data).context("Failed to parse evaluation_items.json")?;
     eprintln!("Loaded {} examples", items.len());
+
+    if cli.typing {
+        return run_typing_sim(&model, &items, cli.no_context, eos);
+    }
 
     let mut results: Vec<ItemResult> = Vec::with_capacity(items.len());
     let mut exact_matches = 0usize;

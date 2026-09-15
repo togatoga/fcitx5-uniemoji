@@ -18,7 +18,7 @@ use llama_cpp_2::token::LlamaToken;
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Global llama.cpp backend (can only be initialized once)
 static LLAMA_BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = OnceLock::new();
@@ -101,9 +101,36 @@ struct BeamState {
     score: f32,
 }
 
+/// KV state the greedy path carries between calls: a persistent context and
+/// the token sequence its cache currently represents (last prompt +
+/// generated tokens). Typing grows the prompt at the tail, so the next call
+/// usually only has to decode the few tokens past the common prefix.
+struct GreedySession {
+    /// Borrows the `Box<LlamaModel>` next to it in [`LlamaCppModel`]; the
+    /// lifetime is erased there under the invariants documented on the field.
+    ctx: LlamaContext<'static>,
+    cached: Vec<LlamaToken>,
+}
+
+// SAFETY: the context is only touched while holding the owning model's
+// mutex, so accesses never overlap; llama.cpp allows moving a context
+// between threads when calls are serialized.
+unsafe impl Send for GreedySession {}
+
+/// Length of the longest common prefix of two token sequences.
+fn common_prefix_len(a: &[LlamaToken], b: &[LlamaToken]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 /// llama.cpp based GPT-2 model for GGUF inference
 pub struct LlamaCppModel {
-    model: LlamaModel,
+    /// Persistent context for the greedy path. Declared before `model` so it
+    /// drops first: its context borrows the model behind the box.
+    greedy_session: Mutex<Option<GreedySession>>,
+    /// Boxed for a stable address — `greedy_session` holds a context whose
+    /// model reference points into this allocation, so the box must never be
+    /// replaced after construction.
+    model: Box<LlamaModel>,
     n_ctx: u32,
     /// External HuggingFace tokenizer (always required).
     /// `tokenize()` and `decode()` use this instead of llama.cpp's built-in tokenizer.
@@ -198,7 +225,8 @@ impl LlamaCppModel {
             .collect();
 
         Ok(Self {
-            model,
+            greedy_session: Mutex::new(None),
+            model: Box::new(model),
             n_ctx,
             external_tokenizer,
             special_token_ids,
@@ -210,6 +238,14 @@ impl LlamaCppModel {
     /// 0 means use llama.cpp default (typically all cores).
     pub fn set_n_threads(&mut self, n: u32) {
         self.n_threads = n;
+        // The session's context was built with the old thread count.
+        *self.lock_greedy_session() = None;
+    }
+
+    fn lock_greedy_session(&self) -> std::sync::MutexGuard<'_, Option<GreedySession>> {
+        self.greedy_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Build LlamaContextParams with configured n_threads
@@ -295,19 +331,109 @@ impl LlamaCppModel {
         }
     }
 
-    /// Generate tokens with greedy decoding
+    /// Generate tokens with greedy decoding.
+    ///
+    /// Runs on a persistent context and re-decodes only the part of the
+    /// prompt past the longest common prefix with the previous call, so a
+    /// prompt that grows keystroke by keystroke costs a few tokens instead
+    /// of a full prefill. Falls back to a one-shot context when the prompt
+    /// cannot fit the session.
     pub fn generate(
         &self,
         input_tokens: &[LlamaToken],
         max_new_tokens: usize,
         eos_token_id: Option<i32>,
     ) -> Result<Vec<LlamaToken>> {
-        self.generate_with_sampler(
-            input_tokens,
-            max_new_tokens,
-            eos_token_id,
-            LlamaSampler::greedy(),
-        )
+        if input_tokens.is_empty() || input_tokens.len() + max_new_tokens >= self.n_ctx as usize {
+            return self.generate_with_sampler(
+                input_tokens,
+                max_new_tokens,
+                eos_token_id,
+                LlamaSampler::greedy(),
+            );
+        }
+
+        let mut guard = self.lock_greedy_session();
+        if guard.is_none() {
+            *guard = Some(self.new_greedy_session()?);
+        }
+        let session = guard.as_mut().expect("session initialized above");
+        let result = self.run_greedy(session, input_tokens, max_new_tokens, eos_token_id);
+        if result.is_err() {
+            // The cache no longer matches `cached`; rebuild next call.
+            *guard = None;
+        }
+        result
+    }
+
+    /// A fresh persistent context for the greedy path. Batches are sized to
+    /// n_ctx: unlike the one-shot paths this allocation happens once, not
+    /// per conversion, so there is nothing to win by shrinking it.
+    fn new_greedy_session(&self) -> Result<GreedySession> {
+        let params = self
+            .context_params()
+            .with_n_batch(self.n_ctx)
+            .with_n_ubatch(self.n_ctx);
+        let ctx = self.new_context(params)?;
+        // SAFETY: the context borrows the model inside `self.model`'s box,
+        // whose address is stable and which is never replaced; the session
+        // lives in a field declared before `model`, so it drops first.
+        let ctx: LlamaContext<'static> = unsafe { std::mem::transmute(ctx) };
+        Ok(GreedySession {
+            ctx,
+            cached: Vec::new(),
+        })
+    }
+
+    /// Greedy generation on the session context, reusing the KV of the
+    /// longest common prefix between `input_tokens` and the previous call.
+    fn run_greedy(
+        &self,
+        session: &mut GreedySession,
+        input_tokens: &[LlamaToken],
+        max_new_tokens: usize,
+        eos_token_id: Option<i32>,
+    ) -> Result<Vec<LlamaToken>> {
+        let n = input_tokens.len();
+        let common = common_prefix_len(&session.cached, input_tokens);
+        // Re-decode at least the final prompt token: sampling needs its
+        // logits even when the whole prompt is already cached.
+        let start = common.min(n - 1);
+
+        session
+            .ctx
+            .kv_cache_seq_rm(0, Some(start as u32), None)
+            .map_err(inference_err)?;
+        // Invalidate before decoding: a failed decode leaves the KV cache in
+        // an unknown state, and `generate` then discards the session.
+        session.cached.clear();
+
+        let mut batch = LlamaBatch::new(self.n_ctx as usize, 1);
+        for (i, token) in input_tokens.iter().enumerate().skip(start) {
+            batch
+                .add(*token, i as i32, &[0], i == n - 1)
+                .map_err(inference_err)?;
+        }
+        session.ctx.decode(&mut batch).map_err(inference_err)?;
+
+        let mut sampler = LlamaSampler::greedy();
+        let model_eos = self.model.token_eos();
+        let mut generated = input_tokens.to_vec();
+        for n_cur in (n..).take(max_new_tokens) {
+            let new_token = sampler.sample(&session.ctx, -1);
+            if self.is_eos_token(new_token, eos_token_id, model_eos) {
+                break;
+            }
+            generated.push(new_token);
+            batch.clear();
+            batch
+                .add(new_token, n_cur as i32, &[0], true)
+                .map_err(inference_err)?;
+            session.ctx.decode(&mut batch).map_err(inference_err)?;
+        }
+
+        session.cached = generated.clone();
+        Ok(generated)
     }
 
     /// Depth-1 beam: pick the top-k initial tokens, then continue each
@@ -1084,5 +1210,70 @@ mod kv_override_tests {
         let buf = kv_override_str(&"x".repeat(200));
         assert_eq!(buf[126], b'x' as std::os::raw::c_char);
         assert_eq!(buf[127], 0, "last byte must remain the NUL terminator");
+    }
+}
+
+#[cfg(test)]
+mod kv_reuse_tests {
+    use super::*;
+    use crate::kanji::build_jinen_prompt;
+    use crate::kanji::hf_download::{get_path_by_id, get_tokenizer_path_by_id};
+    use crate::kanji::model_config::registry;
+
+    #[test]
+    fn common_prefix_len_basics() {
+        let t = |v: &[i32]| v.iter().map(|&x| LlamaToken(x)).collect::<Vec<_>>();
+        assert_eq!(common_prefix_len(&t(&[1, 2, 3]), &t(&[1, 2, 4])), 2);
+        assert_eq!(common_prefix_len(&t(&[]), &t(&[1])), 0);
+        assert_eq!(common_prefix_len(&t(&[1, 2]), &t(&[1, 2])), 2);
+        assert_eq!(common_prefix_len(&t(&[1, 2, 3]), &t(&[1, 2])), 2);
+        assert_eq!(common_prefix_len(&t(&[9]), &t(&[1, 2])), 0);
+    }
+
+    /// Load the default registry model, or `None` when it isn't available
+    /// locally (the tests are skipped rather than failing offline).
+    fn load_model() -> Option<LlamaCppModel> {
+        let reg = registry();
+        let path = get_path_by_id(&reg.default_model).ok()?;
+        let tok_path = get_tokenizer_path_by_id(&reg.default_model).ok()?;
+        LlamaCppModel::from_file(&path, &tok_path).ok()
+    }
+
+    /// The session must produce exactly what a fresh context produces, over
+    /// the call sequences typing actually generates: prompts growing one
+    /// kana at a time, backspace to a shorter prefix, an exact repeat, a
+    /// switch to an unrelated prompt, and a left-context change (which
+    /// flips the very front of the prompt).
+    #[test]
+    fn matches_fresh_context_across_call_sequences() {
+        let Some(model) = load_model() else {
+            eprintln!("model unavailable, skipping");
+            return;
+        };
+        let eos = Some(model.eos_token_id().0);
+
+        let cases: [(&str, &str); 9] = [
+            ("ワ", ""),
+            ("ワタ", ""),
+            ("ワタシ", ""),
+            ("ワタシハ", ""),
+            ("ワタシハガクセイ", ""),
+            ("ワタシ", ""),             // backspace
+            ("ワタシ", ""),             // repeat
+            ("キョウハイイテンキ", ""), // unrelated switch
+            ("ハシ", "箸を持つ。"),     // context change
+        ];
+        for (katakana, context) in cases {
+            let prompt = build_jinen_prompt(katakana, context);
+            let tokens = model.tokenize(&prompt).expect("tokenize failed");
+            let session = model.generate(&tokens, 20, eos).expect("generate failed");
+            let fresh = model
+                .generate_with_sampler(&tokens, 20, eos, LlamaSampler::greedy())
+                .expect("fresh generate failed");
+            assert_eq!(
+                session, fresh,
+                "diverged for 「{katakana}」 ctx 「{context}」"
+            );
+        }
     }
 }
